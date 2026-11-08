@@ -1,0 +1,27 @@
+# Plain Lean language server; the goal pane (lean-goals.scm) uses its $/lean/plainGoal request.
+[language-server.lean]
+command = "lake"
+args = ["serve"]
+
+# Unicode input (\to -> →); table lives in ./unicode-input via UNICODE_INPUT_PATH (set in the flake).
+[language-server.scls]
+command = "simple-completion-language-server"
+
+[language-server.scls.config]
+feature_words = false
+feature_snippets = false
+feature_unicode_input = true
+case_sensitive = true # \N (ℕ) vs \n
+
+[[language]]
+name = "lean"
+language-servers = ["lean", "scls"]
+
+# The goal pane's buffer (lean-goals.scm sets it): Lean highlighting, no language servers.
+# Its queries are in .helix/runtime/queries/lean-goals; the dev shell points HELIX_RUNTIME there.
+[[language]]
+name = "lean-goals"
+scope = "source.lean-goals"
+grammar = "lean"
+file-types = []
+language-servers = []
