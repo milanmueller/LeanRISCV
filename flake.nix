@@ -41,6 +41,10 @@
               pkgs.elan # provides lean/lake matching ./lean-toolchain
               (helixWithSteel system) # editor with project-local config in .helix/
               pkgs.simple-completion-language-server # unicode input (\to -> →)
+              # Bare-metal RISC-V cross toolchain (riscv32-none-elf-{as,ld,gcc,objdump,...})
+              pkgs.pkgsCross.riscv32-embedded.buildPackages.gcc
+              pkgs.pkgsCross.riscv32-embedded.buildPackages.binutils
+              pkgs.qemu # qemu-system-riscv32 (and qemu-riscv32 user mode on Linux)
             ];
             shellHook = ''
               export UNICODE_INPUT_PATH="$PWD/unicode-input"
@@ -53,7 +57,7 @@
               # Helix's LSP initialize times out and kills the server.
               # (the elan proxy installs the toolchain from ./lean-toolchain on first use)
               lake --version >/dev/null
-              echo "Lean playground: run 'hx Demo/Basic.lean'."
+              echo "Lean playground: run 'hx Rv32i/Basic.lean'."
             '';
           };
         }

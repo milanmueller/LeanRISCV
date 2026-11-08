@@ -1,5 +1,5 @@
-name = "demo"
-defaultTargets = ["Demo"]
+name = "rv32i"
+defaultTargets = ["Rv32i"]
 
 [[lean_lib]]
-name = "Demo"
+name = "Rv32i"
