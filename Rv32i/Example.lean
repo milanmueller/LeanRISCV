@@ -39,11 +39,11 @@ theorem example1_loop (k : Nat) : ∀ s : State, 1 ≤ k → k ≤ 10 →
   | succ k ih =>
     intro s _ hk hpc ht0
     -- add a0, a0, t0
-    let s1 := (s.write .a0 (s.read .a0 + s.read .t0)).next
+    let s1 := State.next (s.write .a0 (s.read .a0 + s.read .t0))
     have h1 : fetch example1 s.pc = some (.RI .add .a0 .a0 .t0) := by rw [hpc]; rfl
     have e1 : step s (.RI .add .a0 .a0 .t0) = some s1 := rfl
     -- addi t0, t0, -1
-    let s2 := (s1.write .t0 (s1.read .t0 + (-1 : BitVec 12).signExtend 32)).next
+    let s2 := State.next (s1.write .t0 (s1.read .t0 + (-1 : BitVec 12).signExtend 32))
     have h2 : fetch example1 s1.pc = some (.II .addi .t0 .t0 (-1)) := by simp [s1, hpc]; rfl
     have e2 : step s1 (.II .addi .t0 .t0 (-1)) = some s2 := rfl
     -- bne t0, zero, -8
@@ -60,7 +60,7 @@ theorem example1_loop (k : Nat) : ∀ s : State, 1 ≤ k → k ≤ 10 →
     · -- jump back to `add` and continue by induction
       have e3 : step s2 (.BI .bne .t0 .zero (-4)) = some { s2 with pc := 8 } := by
         have : BitVec.ofNat 32 k ≠ 0 := by bv_omega
-        simp only [step, BInstr.eval, ht0', State.read_zero]
+        simp only [step, BInstr.eval, ht0', Machine.State.read_zero]
         simp [State.jump, s2, s1, hpc]
         exact fun h => absurd h this
       obtain ⟨s', hst, hpc', ha0⟩ := ih { s2 with pc := 8 } (by omega) (by omega) rfl ht0'
@@ -70,18 +70,19 @@ theorem example1_loop (k : Nat) : ∀ s : State, 1 ≤ k → k ≤ 10 →
       simp [s2, s1, ht0, tri, BitVec.ofNat_add, BitVec.add_assoc]
 
 /-- From any initial registers and memory, `example1` exits with code 55. -/
-theorem example1_correct (s : State) (hpc : s.pc = 0) : Terminates example1 s 55 := by
+theorem example1_correct (s : State) (hpc : s.initial) : Terminates example1 s 55 := by
   -- addi a0, zero, 0
-  let s1 := (s.write .a0 (s.read .zero + (0 : BitVec 12).signExtend 32)).next
+  let s1 := State.next (s.write .a0 (s.read .zero + (0 : BitVec 12).signExtend 32))
   have e1 : step s (.II .addi .a0 .zero 0) = some s1 := rfl
   -- addi t0, zero, 10
-  let s2 := (s1.write .t0 (s1.read .zero + (10 : BitVec 12).signExtend 32)).next
+  let s2 := State.next (s1.write .t0 (s1.read .zero + (10 : BitVec 12).signExtend 32))
   have e2 : step s1 (.II .addi .t0 .zero 10) = some s2 := rfl
   -- the loop
+  simp [Asm.State.initial] at hpc
   obtain ⟨s3, hst, hpc3, ha0⟩ :=
     example1_loop 10 s2 (by decide) (by decide) (by simp [s2, s1, hpc]) (by simp [s2, s1])
   -- addi a7, zero, 93
-  let s4 := (s3.write .a7 (s3.read .zero + (93 : BitVec 12).signExtend 32)).next
+  let s4 := State.next (s3.write .a7 (s3.read .zero + (93 : BitVec 12).signExtend 32))
   have e4 : step s3 (.II .addi .a7 .zero 93) = some s4 := rfl
   refine ⟨s4, .head _ (by rw [hpc]; rfl) e1 (.head _ (by simp [s1, hpc]; rfl) e2
     (.trans hst (.head _ (by rw [hpc3]; rfl) e4 (.refl _)))), ⟨?_, ?_⟩, ?_⟩

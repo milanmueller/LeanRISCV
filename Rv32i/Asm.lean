@@ -1,4 +1,4 @@
-import Rv32i.Register
+import Rv32i.Machine
 
 /-!
 # `Asm` Language
@@ -150,85 +150,37 @@ def Program.render (p : Program) : String :=
 
 /-!
 ## Semantics
-We model state as:
-- A total valuation of registers. Initial values are unspecified, so theorems should
-  quantify over the initial state rather than assume a default.
-- Byte-addressed memory `Word -> BitVec 8` over the full 32-bit address space
-  (little-endian, like RISC-V).
-- The program counter as a byte address.
-
-`step` returns `none` where execution gets stuck:
-`ecall` / `ebreak` (we model no environment), jumps to targets that are not 4-byte
-aligned (an exception on hardware without the C extension), and misaligned loads/stores
-(implementation-defined on hardware; we choose to trap).
+The machine state (registers, memory, pc) is `Machine.State`, shared with `Sym`;
+`Asm` uses a byte address as program counter.
 -/
-structure State where
-  regs : Reg -> Word
-  mem  : Word -> BitVec 8
-  pc   : Word
 
-namespace State
+/-- `Asm` state: the program counter is a byte address. -/
+abbrev State := Machine.State Word
 
-/-- Read a register; `zero` always reads as `0`. -/
-def read (s : State) (r : Reg) : Word :=
-  if r = .zero then 0 else s.regs r
 
-/-- Write a register; writes to `zero` are discarded. -/
-def write (s : State) (rd : Reg) (v : Word) : State :=
-  if rd = .zero then s
-  else { s with regs := fun r => if r = rd then v else s.regs r }
+/-!
+### Byte-address pc
+Control flow on `Asm` states, in the `Asm.State` namespace (`Sym` has its own versions).
+
+Dot notation (`s.next`) only finds these when `s` has type `Asm.State`. The generic
+functions `write` and `store` return a `Machine.State Word` instead, for which dot
+notation only searches `Machine.State`; on their results, call these as functions:
+`State.next (s.write rd v)`.
+-/
 
 /-- Continue with the next instruction. -/
-def next (s : State) : State := { s with pc := s.pc + 4 }
+def State.next (s : State) : State := { s with pc := s.pc + 4 }
 
-/-! Simp lemmas for reasoning about register reads and the pc symbolically,
-without unfolding the register function. -/
-
-@[simp] theorem read_zero (s : State) : s.read .zero = 0 := rfl
-
-@[simp] theorem read_write (s : State) (rd r : Reg) (v : Word) :
-    (s.write rd v).read r = if r = .zero then 0 else if r = rd then v else s.read r := by
-  unfold write read
-  by_cases h : rd = .zero <;> by_cases h' : r = .zero <;> simp_all
-
-@[simp] theorem write_pc (s : State) (rd : Reg) (v : Word) : (s.write rd v).pc = s.pc := by
-  unfold write; split <;> rfl
-
-@[simp] theorem next_pc (s : State) : s.next.pc = s.pc + 4 := rfl
-@[simp] theorem next_read (s : State) (r : Reg) : s.next.read r = s.read r := rfl
+@[simp] theorem State.next_pc (s : State) : (State.next s).pc = s.pc + 4 := rfl
+@[simp] theorem State.next_read (s : State) (r : Reg) :
+    (State.next s).read r = s.read r := rfl
 
 /-- Jump to `target`, getting stuck if it is not 4-byte aligned. -/
-def jump (s : State) (target : Word) : Option State :=
+def State.jump (s : State) (target : Word) : Option State :=
   if target.toNat % 4 = 0 then some { s with pc := target } else none
 
-/-! ### Memory access (little-endian) -/
-
-def load8 (s : State) (a : Word) : BitVec 8 := s.mem a
-def load16 (s : State) (a : Word) : BitVec 16 := s.load8 (a + 1) ++ s.load8 a
-def load32 (s : State) (a : Word) : Word := s.load16 (a + 2) ++ s.load16 a
-
-def store8 (s : State) (a : Word) (v : BitVec 8) : State :=
-  { s with mem := fun x => if x = a then v else s.mem x }
-def store16 (s : State) (a : Word) (v : BitVec 16) : State :=
-  (s.store8 a (v.extractLsb' 0 8)).store8 (a + 1) (v.extractLsb' 8 8)
-def store32 (s : State) (a : Word) (v : Word) : State :=
-  (s.store16 a (v.extractLsb' 0 16)).store16 (a + 2) (v.extractLsb' 16 16)
-
-/-- Execute a load from address `a`, extending the result to a full word. -/
-def load (s : State) : ILInstr -> Word -> Option Word
-  | .lb,  a => some ((s.load8 a).signExtend 32)
-  | .lbu, a => some ((s.load8 a).setWidth 32)
-  | .lh,  a => if a.toNat % 2 = 0 then some ((s.load16 a).signExtend 32) else none
-  | .lhu, a => if a.toNat % 2 = 0 then some ((s.load16 a).setWidth 32) else none
-  | .lw,  a => if a.toNat % 4 = 0 then some (s.load32 a) else none
-
-/-- Execute a store of (the low bits of) `v` to address `a`. -/
-def store (s : State) : SInstr -> Word -> Word -> Option State
-  | .sb, a, v => some (s.store8 a (v.setWidth 8))
-  | .sh, a, v => if a.toNat % 2 = 0 then some (s.store16 a (v.setWidth 16)) else none
-  | .sw, a, v => if a.toNat % 4 = 0 then some (s.store32 a v) else none
-
-end State
+def State.initial (s : State) : Prop :=
+  s.pc = 0
 
 /-! ### Operations -/
 
@@ -263,32 +215,49 @@ def BInstr.eval : BInstr -> Word -> Word -> Bool
   | .bltu, a, b => a.ult b
   | .bgeu, a, b => !a.ult b
 
+/-- Execute a load from address `a`, extending the result to a full word.
+Generic in the pc type, so `Sym` can reuse it. -/
+def ILInstr.load {PC : Type} : ILInstr -> Machine.State PC -> Word -> Option Word
+  | .lb,  s, a => some ((s.load8 a).signExtend 32)
+  | .lbu, s, a => some ((s.load8 a).setWidth 32)
+  | .lh,  s, a => if a.toNat % 2 = 0 then some ((s.load16 a).signExtend 32) else none
+  | .lhu, s, a => if a.toNat % 2 = 0 then some ((s.load16 a).setWidth 32) else none
+  | .lw,  s, a => if a.toNat % 4 = 0 then some (s.load32 a) else none
+
+/-- Execute a store of (the low bits of) `v` to address `a`.
+Generic in the pc type, so `Sym` can reuse it. -/
+def SInstr.store {PC : Type} :
+    SInstr -> Machine.State PC -> Word -> Word -> Option (Machine.State PC)
+  | .sb, s, a, v => some (s.store8 a (v.setWidth 8))
+  | .sh, s, a, v => if a.toNat % 2 = 0 then some (s.store16 a (v.setWidth 16)) else none
+  | .sw, s, a, v => if a.toNat % 4 = 0 then some (s.store32 a v) else none
+
 /-- Execute a single instruction. -/
 def step (s : State) : Instr -> Option State
   | .RI op rd rs1 rs2 =>
-      some (s.write rd (op.eval (s.read rs1) (s.read rs2))).next
+      some <| State.next (s.write rd (op.eval (s.read rs1) (s.read rs2)))
   | .II op rd rs1 imm =>
-      some (s.write rd (op.toRInstr.eval (s.read rs1) (imm.signExtend 32))).next
+      some <| State.next (s.write rd (op.toRInstr.eval (s.read rs1) (imm.signExtend 32)))
   | .IShI op rd rs1 shamt =>
-      some (s.write rd (op.toRInstr.eval (s.read rs1) (shamt.setWidth 32))).next
+      some <| State.next (s.write rd (op.toRInstr.eval (s.read rs1) (shamt.setWidth 32)))
   | .ILI op rd rs1 imm => do
-      let v ← s.load op (s.read rs1 + imm.signExtend 32)
-      pure (s.write rd v).next
+      let v ← op.load s (s.read rs1 + imm.signExtend 32)
+      pure <| State.next (s.write rd v)
   | .SI op rs1 rs2 imm => do
-      let s' ← s.store op (s.read rs1 + imm.signExtend 32) (s.read rs2)
-      pure s'.next
+      let s' ← op.store s (s.read rs1 + imm.signExtend 32) (s.read rs2)
+      pure <| State.next s'
   | .BI op rs1 rs2 off =>
       if op.eval (s.read rs1) (s.read rs2)
       then s.jump (s.pc + (off ++ 0#1).signExtend 32)
       else some s.next
   | .JI .jal rd off =>
-      (s.write rd (s.pc + 4)).jump (s.pc + (off ++ 0#1).signExtend 32)
+      State.jump (s.write rd (s.pc + 4)) (s.pc + (off ++ 0#1).signExtend 32)
   | .jalr rd rs1 imm =>
       -- compute the target before writing `rd`, which may equal `rs1`
       let target := (s.read rs1 + imm.signExtend 32) &&& ~~~1
-      (s.write rd (s.pc + 4)).jump target
-  | .UI .lui rd imm   => some (s.write rd (imm ++ 0#12)).next
-  | .UI .auipc rd imm => some (s.write rd (s.pc + (imm ++ 0#12))).next
+      State.jump (s.write rd (s.pc + 4)) target
+  | .UI .lui rd imm   => some <| State.next (s.write rd (imm ++ 0#12))
+  | .UI .auipc rd imm => some <| State.next (s.write rd (s.pc + (imm ++ 0#12)))
   | .ISysI _ => none
 
 /-- Fetch instruction from a Program for given `pc`. -/
