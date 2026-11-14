@@ -1,20 +1,19 @@
-import Rv32i.Asm
+import Rv32i.Asm_Mnemonics
 
 open Asm
 
 -- Branch / jump immediates are in units of 2 bytes (the implicit bit 0
 -- is not encoded), so `n` means a byte offset of `2 * n`.
 
-open Instr in
 def example1 : Program :=
-  [ II .addi Reg.a0 Reg.zero 0           -- 0x00: sum := 0
-  , II .addi Reg.t0 Reg.zero 10          -- 0x04: i := 10
-  , RI .add Reg.a0 Reg.a0 Reg.t0         -- 0x08: sum += i
-  , II .addi Reg.t0 Reg.t0 (-1)          -- 0x0c: i -= 1
-  , BI .bne Reg.t0 Reg.zero (-4)         -- 0x10: while i != 0 (-8 bytes: back to `add`)
-  , II .addi Reg.a7 Reg.zero 93          -- 0x14: Linux `exit` syscall
-  , ISysI .ecall                         -- 0x18: exit(a0) = exit(55)
-  , ISysI .ebreak ]                      -- 0x1c
+  [ .addi .a0 .zero 0           -- 0x00: sum := 0
+  , .addi .t0 .zero 10          -- 0x04: i := 10
+  , .add  .a0 .a0 .t0           -- 0x08: sum += i
+  , .addi .t0 .t0 (-1)          -- 0x0c: i -= 1
+  , .bne  .t0 .zero (-4)        -- 0x10: while i != 0 (-8 bytes: back to `add`)
+  , .addi .a7 .zero 93          -- 0x14: Linux `exit` syscall
+  , .ecall                      -- 0x18: exit(a0) = exit(55)
+  , .ebreak ]                   -- 0x1c
 
 def main : IO Unit := IO.print example1.render
 
@@ -89,3 +88,4 @@ theorem example1_correct (s : State) (hpc : s.initial) : Terminates example1 s 5
   · simp [s4, hpc3]; rfl
   · simp [s4]
   · simp [s4, ha0, s2, s1, tri]
+
