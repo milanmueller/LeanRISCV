@@ -105,9 +105,9 @@ def step (s : State) : Instr -> Option State
   | .RI op rd rs1 rs2 =>
       some <| State.next (s.write rd (op.eval (s.read rs1) (s.read rs2)))
   | .II op rd rs1 imm =>
-      some <| State.next (s.write rd (op.toRInstr.eval (s.read rs1) (imm.signExtend 32)))
-  | .IShI op rd rs1 shamt =>
-      some <| State.next (s.write rd (op.toRInstr.eval (s.read rs1) (shamt.setWidth 32)))
+      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
+  | .IShI op rd rs1 imm =>
+      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
   | .ILI op rd rs1 imm => do
       let v ← op.load s (s.read rs1 + imm.signExtend 32)
       pure <| State.next (s.write rd v)

@@ -104,7 +104,7 @@ instance : ToString UInstr where
 Branch / jump offsets are in units of 2 bytes (the implicit bit 0 is not encoded),
 so an offset `n` means a byte offset of `2 * n` relative to the jumping instruction. -/
 inductive Instr
-  | RI (instr : RInstr) (rd : Reg) (rs1 : Reg) (rs2 : Reg)
+  | RI(instr : RInstr) (rd : Reg) (rs1 : Reg) (rs2 : Reg)
   | II (instr : IInstr) (rd : Reg) (rs1 : Reg) (imm : Imm12)
   | IShI (instr : IShInstr) (rd : Reg) (rs1 : Reg) (imm : Imm5)
   | ILI (instr : ILInstr) (rd : Reg) (rs1 : Reg) (imm : Imm12)
@@ -132,14 +132,14 @@ instance : ToString Instr where
 /-!
 ### Programs
 Other than in `Sym`, we don't support symbolic targets.
-We hence gain nothing from supporting labels and instead model programs
-by a flat array of instructions to simplify pc semantics.
+Programs are represented as a flat list of instructions.
 -/
 abbrev Program := List Instr
 
-/-- Render a program as a complete assembly file.
+/--
+Render a program as a complete assembly file.
 The program is a single `_start` block, so instruction `i` sits at byte offset `4 * i`.
-(No `ToString` instance: `Program` unfolds to `List Instr`, which already has one.) -/
+ -/
 def Program.render (p : Program) : String :=
   let preamble :=
     [ ".option norvc"   -- no compressed instructions: keeps `. + n` offsets exact
@@ -153,19 +153,10 @@ def Program.render (p : Program) : String :=
 The machine state (registers, memory, pc) is `Machine.State`, shared with `Sym`;
 `Asm` uses a byte address as program counter.
 -/
-
-/-- `Asm` state: the program counter is a byte address. -/
 abbrev State := Machine.State Word
-
 
 /-!
 ### Byte-address pc
-Control flow on `Asm` states, in the `Asm.State` namespace (`Sym` has its own versions).
-
-Dot notation (`s.next`) only finds these when `s` has type `Asm.State`. The generic
-functions `write` and `store` return a `Machine.State Word` instead, for which dot
-notation only searches `Machine.State`; on their results, call these as functions:
-`State.next (s.write rd v)`.
 -/
 
 /-- Continue with the next instruction. -/
@@ -184,7 +175,6 @@ def State.initial (s : State) : Prop :=
 
 /-! ### Operations -/
 
-/-- The result of an R-type operation. Shifts only use the low 5 bits of the amount. -/
 def RInstr.eval : RInstr -> Word -> Word -> Word
   | .add,  a, b => a + b
   | .sub,  a, b => a - b
@@ -197,14 +187,18 @@ def RInstr.eval : RInstr -> Word -> Word -> Word
   | .or,   a, b => a.or b
   | .and,  a, b => a.and b
 
-/-- I-type operations are R-type operations with a (sign-extended) immediate operand.
-Note that `sltiu` compares against the *sign*-extended immediate, as unsigned. -/
-def IInstr.toRInstr : IInstr -> RInstr
-  | .addi => .add | .xori => .xor | .ori => .or
-  | .andi => .and | .slti => .slt | .sltiu => .sltu
+def IInstr.eval : IInstr -> Word -> Imm12 -> Word
+  | .addi,  rs, imm => rs + imm.signExtend 32
+  | .xori,  rs, imm => rs.xor (imm.signExtend 32)
+  | .ori,   rs, imm => rs.or (imm.signExtend 32)
+  | .andi,  rs, imm => rs.and (imm.signExtend 32)
+  | .slti,  rs, imm => if rs.slt (imm.signExtend 32) then 1 else 0
+  | .sltiu, rs, imm => if rs.ult (imm.signExtend 32) then 1 else 0
 
-def IShInstr.toRInstr : IShInstr -> RInstr
-  | .slli => .sll | .srli => .srl | .srai => .sra
+def IShInstr.eval : IShInstr -> Word -> Imm5 -> Word
+  | .slli, rs, imm => rs.shiftLeft (imm.toNat)
+  | .srli, rs, imm => rs.ushiftRight (imm.toNat)
+  | .srai, rs, imm => rs.sshiftRight (imm.toNat)
 
 /-- Whether a branch is taken. -/
 def BInstr.eval : BInstr -> Word -> Word -> Bool
@@ -237,9 +231,9 @@ def step (s : State) : Instr -> Option State
   | .RI op rd rs1 rs2 =>
       some <| State.next (s.write rd (op.eval (s.read rs1) (s.read rs2)))
   | .II op rd rs1 imm =>
-      some <| State.next (s.write rd (op.toRInstr.eval (s.read rs1) (imm.signExtend 32)))
-  | .IShI op rd rs1 shamt =>
-      some <| State.next (s.write rd (op.toRInstr.eval (s.read rs1) (shamt.setWidth 32)))
+      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
+  | .IShI op rd rs1 imm =>
+      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
   | .ILI op rd rs1 imm => do
       let v ← op.load s (s.read rs1 + imm.signExtend 32)
       pure <| State.next (s.write rd v)
@@ -264,10 +258,7 @@ def step (s : State) : Instr -> Option State
 def fetch (p : Program) (pc : Word) : Option Instr :=
   if pc % 4 ≠ 0 then none else p[(pc / 4).toNat]?
 
-/--
-Core reasoning Definition: `Step p s s'` means that in program `p`,
-`s'` is the successor state of state `s`.
--/
+/-- Small step relation between a state and it's successor -/
 def Step (p : Program) (s s' : State) : Prop :=
   ∃ i, fetch p s.pc = some i ∧ step s i = s'
 
@@ -282,9 +273,6 @@ inductive Step.Star (p : Program) : State -> State -> Prop
 A program terminates by making the Linux `exit` system call: `ecall` with the syscall
 number `93` in `a7` and the exit code in `a0` (the OS only reports its low 8 bits).
 This is how programs end when run as a process, e.g. under `qemu-riscv32`.
-
-Any other way of getting stuck (`ebreak`, other syscalls, misaligned accesses, running off
-the program) is a fault, not termination.
 -/
 
 /-- The Linux `exit` syscall number. -/
