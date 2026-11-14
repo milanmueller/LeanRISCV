@@ -1,6 +1,6 @@
-import Rv32i.Asm_Mnemonics
+import Rv32i.Asm
 
-open Asm
+open Rv32i Rv32i.Asm Rv32i.Asm.Program
 
 -- Branch / jump immediates are in units of 2 bytes (the implicit bit 0
 -- is not encoded), so `n` means a byte offset of `2 * n`.
@@ -12,8 +12,7 @@ def example1 : Program :=
   , .addi .t0 .t0 (-1)          -- 0x0c: i -= 1
   , .bne  .t0 .zero (-4)        -- 0x10: while i != 0 (-8 bytes: back to `add`)
   , .addi .a7 .zero 93          -- 0x14: Linux `exit` syscall
-  , .ecall                      -- 0x18: exit(a0) = exit(55)
-  , .ebreak ]                   -- 0x1c
+  , .ecall ]                    -- 0x18: exit(a0) = exit(55)
 
 def main : IO Unit := IO.print example1.render
 
@@ -69,7 +68,7 @@ theorem example1_loop (k : Nat) : ∀ s : State, 1 ≤ k → k ≤ 10 →
       simp [s2, s1, ht0, tri, BitVec.ofNat_add, BitVec.add_assoc]
 
 /-- From any initial registers and memory, `example1` exits with code 55. -/
-theorem example1_correct (s : State) (hpc : s.initial) : Terminates example1 s 55 := by
+theorem example1_correct (s : State) (hpc : s.initial) : Exits example1 s 55 := by
   -- addi a0, zero, 0
   let s1 := State.next (s.write .a0 (s.read .zero + (0 : BitVec 12).signExtend 32))
   have e1 : step s (.II .addi .a0 .zero 0) = some s1 := rfl
@@ -83,8 +82,8 @@ theorem example1_correct (s : State) (hpc : s.initial) : Terminates example1 s 5
   -- addi a7, zero, 93
   let s4 := State.next (s3.write .a7 (s3.read .zero + (93 : BitVec 12).signExtend 32))
   have e4 : step s3 (.II .addi .a7 .zero 93) = some s4 := rfl
-  refine ⟨s4, .head _ (by rw [hpc]; rfl) e1 (.head _ (by simp [s1, hpc]; rfl) e2
-    (.trans hst (.head _ (by rw [hpc3]; rfl) e4 (.refl _)))), ⟨?_, ?_⟩, ?_⟩
+  refine ⟨s4, ⟨.head _ (by rw [hpc]; rfl) e1 (.head _ (by simp [s1, hpc]; rfl) e2
+    (.trans hst (.head _ (by rw [hpc3]; rfl) e4 (.refl _)))), ?_, ?_⟩, ?_⟩
   · simp [s4, hpc3]; rfl
   · simp [s4]
   · simp [s4, ha0, s2, s1, tri]

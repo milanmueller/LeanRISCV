@@ -1,3 +1,5 @@
+namespace Rv32i
+
 /-!
 # Registers
 -/
@@ -49,3 +51,5 @@ end Reg
 abbrev TReg := { r : Reg // r.isDest }
 
 instance : Coe TReg Reg := ⟨Subtype.val⟩
+
+end Rv32i

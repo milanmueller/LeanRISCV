@@ -1,0 +1,357 @@
+import Rv32i.Machine
+
+namespace Rv32i
+
+/-!
+# `Asm` Language
+The final language of the compilation/refinement pipeline.
+(Pretty-) printing `Asm.Program` results in valid RISC-V assembly.
+
+Jump targets are numeric, pc-relative offsets, and `jalr` jumps to a computed address.
+The instruction kinds (`RInstr`, `IInstr`, ...) defined here are shared with `Sym`.
+-/
+
+namespace Asm
+
+/-!
+## Instruction Types
+-/
+
+abbrev Imm5  := BitVec 5
+abbrev Imm12 := BitVec 12
+abbrev Imm20 := BitVec 20
+
+inductive RInstr
+  | add | sub | sll | slt | sltu | xor | srl | sra | or | and
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString RInstr where
+  toString : RInstr -> String
+    | .add => "add" | .sub => "sub" | .sll => "sll" | .slt => "slt"
+    | .sltu => "sltu" | .xor => "xor" | .srl => "srl" | .sra => "sra"
+    | .or => "or" | .and => "and"
+
+inductive IInstr
+  | addi | xori | ori | andi | slti | sltiu
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString IInstr where
+  toString : IInstr -> String
+    | .addi => "addi" | .xori => "xori" | .ori => "ori"
+    | .andi => "andi" | .slti => "slti" | .sltiu => "sltiu"
+
+inductive IShInstr
+  | slli | srli | srai
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString IShInstr where
+  toString : IShInstr -> String
+    | .slli => "slli" | .srli => "srli" | .srai => "srai"
+
+inductive ILInstr
+  | lb | lh | lw | lbu | lhu
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString ILInstr where
+  toString : ILInstr -> String
+    | .lb => "lb" | .lh => "lh" | .lw => "lw"
+    | .lbu => "lbu" | .lhu => "lhu"
+
+inductive ISysInstr
+  | ecall
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString ISysInstr where
+  toString : ISysInstr -> String
+    | .ecall => "ecall"
+
+inductive SInstr
+  | sb | sh | sw
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString SInstr where
+  toString : SInstr -> String
+    | .sb => "sb" | .sh => "sh" | .sw => "sw"
+
+inductive BInstr
+  | beq | bne | blt | bge | bltu | bgeu
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString BInstr where
+  toString : BInstr -> String
+    | .beq => "beq" | .bne => "bne" | .blt => "blt" | .bge => "bge"
+    | .bltu => "bltu" | .bgeu => "bgeu"
+
+inductive JInstr
+  | jal
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString JInstr where
+  toString : JInstr -> String
+    | .jal => "jal"
+
+inductive UInstr
+  | lui | auipc
+  deriving DecidableEq, BEq, Inhabited
+
+instance : ToString UInstr where
+  toString : UInstr -> String
+    | .lui => "lui" | .auipc => "auipc"
+
+/-!
+## Instructions
+-/
+
+/-- Instructions with numeric jump targets.
+Branch / jump offsets are in units of 2 bytes (the implicit bit 0 is not encoded),
+so an offset `n` means a byte offset of `2 * n` relative to the jumping instruction. -/
+inductive Instr
+  | RI (instr : RInstr) (rd : Reg) (rs1 : Reg) (rs2 : Reg)
+  | II (instr : IInstr) (rd : Reg) (rs1 : Reg) (imm : Imm12)
+  | IShI (instr : IShInstr) (rd : Reg) (rs1 : Reg) (imm : Imm5)
+  | ILI (instr : ILInstr) (rd : Reg) (rs1 : Reg) (imm : Imm12)
+  | ISysI (instr : ISysInstr)
+  | SI (instr : SInstr) (rs1 : Reg) (rs2 : Reg) (imm : Imm12)
+  | BI (instr : BInstr) (rs1 : Reg) (rs2 : Reg) (offset : Imm12)
+  | JI (instr : JInstr) (rd : Reg) (offset : Imm20)
+  /-- Jump to the address `rs1 + imm` (bit 0 cleared), storing `pc + 4` in `rd`. -/
+  | jalr (rd : Reg) (rs1 : Reg) (imm : Imm12)
+  | UI (instr : UInstr) (rd : Reg) (imm : Imm20)
+
+instance : ToString Instr where
+  toString : Instr -> String
+    | .RI i rd rs1 rs2   => s!"{i} {rd.abiName}, {rs1.abiName}, {rs2.abiName}"
+    | .II i rd rs1 imm   => s!"{i} {rd.abiName}, {rs1.abiName}, {imm.toInt}"
+    | .IShI i rd rs1 imm => s!"{i} {rd.abiName}, {rs1.abiName}, {imm.toNat}"
+    | .ILI i rd rs1 imm  => s!"{i} {rd.abiName}, {imm.toInt}({rs1.abiName})"
+    | .ISysI i           => s!"{i}"
+    | .SI i rs1 rs2 imm  => s!"{i} {rs2.abiName}, {imm.toInt}({rs1.abiName})"
+    | .BI i rs1 rs2 off  => s!"{i} {rs1.abiName}, {rs2.abiName}, . + {2 * off.toInt}"
+    | .JI i rd off       => s!"{i} {rd.abiName}, . + {2 * off.toInt}"
+    | .jalr rd rs1 imm   => s!"jalr {rd.abiName}, {imm.toInt}({rs1.abiName})"
+    | .UI i rd imm       => s!"{i} {rd.abiName}, {imm.toNat}"
+
+/-- The `ret` pseudo instruction: return to the caller, i.e. jump to the address in `ra`. -/
+abbrev Instr.ret : Instr := .jalr .zero .ra 0
+
+/-!
+### Programs
+Other than in `Sym`, we don't support symbolic targets.
+Programs are represented as a flat list of instructions.
+-/
+
+abbrev Program := List Instr
+
+/--
+Render a program as a complete assembly file.
+The program is a single `_start` block, so instruction `i` sits at byte offset `4 * i`.
+ -/
+def Program.render (p : Program) : String :=
+  let preamble :=
+    [ ".option norvc"   -- no compressed instructions: keeps `. + n` offsets exact
+    , ".text"           -- following lines are code
+    , ".globl _start"   -- export `_start`, the linker's default entry
+    , "_start:" ]
+  String.intercalate "\n" (preamble ++ p.map (s!"  {·}")) ++ "\n"
+
+/-!
+## Semantics
+The machine state (registers, memory, pc) is `Machine.State`, shared with `Sym`;
+`Asm` uses a byte address as program counter.
+-/
+abbrev State := Machine.State Word
+
+/-!
+### Byte-address pc
+-/
+
+/-- Continue with the next instruction. -/
+def State.next (s : State) : State := { s with pc := s.pc + 4 }
+
+@[simp] theorem State.next_pc (s : State) : (State.next s).pc = s.pc + 4 := rfl
+@[simp] theorem State.next_read (s : State) (r : Reg) :
+    (State.next s).read r = s.read r := rfl
+
+/-- Jump to `target`, getting stuck if it is not 4-byte aligned. -/
+def State.jump (s : State) (target : Word) : Option State :=
+  if target.toNat % 4 = 0 then some { s with pc := target } else none
+
+def State.initial (s : State) : Prop :=
+  s.pc = 0
+
+/-! ### Operations -/
+
+def RInstr.eval : RInstr -> Word -> Word -> Word
+  | .add,  a, b => a + b
+  | .sub,  a, b => a - b
+  | .sll,  a, b => a.shiftLeft (b.toNat % 32)
+  | .slt,  a, b => if a.slt b then 1 else 0
+  | .sltu, a, b => if a.ult b then 1 else 0
+  | .xor,  a, b => a.xor b
+  | .srl,  a, b => a.ushiftRight (b.toNat % 32)
+  | .sra,  a, b => a.sshiftRight (b.toNat % 32)
+  | .or,   a, b => a.or b
+  | .and,  a, b => a.and b
+
+def IInstr.eval : IInstr -> Word -> Imm12 -> Word
+  | .addi,  rs, imm => rs + imm.signExtend 32
+  | .xori,  rs, imm => rs.xor (imm.signExtend 32)
+  | .ori,   rs, imm => rs.or (imm.signExtend 32)
+  | .andi,  rs, imm => rs.and (imm.signExtend 32)
+  | .slti,  rs, imm => if rs.slt (imm.signExtend 32) then 1 else 0
+  | .sltiu, rs, imm => if rs.ult (imm.signExtend 32) then 1 else 0
+
+def IShInstr.eval : IShInstr -> Word -> Imm5 -> Word
+  | .slli, rs, imm => rs.shiftLeft (imm.toNat)
+  | .srli, rs, imm => rs.ushiftRight (imm.toNat)
+  | .srai, rs, imm => rs.sshiftRight (imm.toNat)
+
+/-- Whether a branch is taken. -/
+def BInstr.eval : BInstr -> Word -> Word -> Bool
+  | .beq,  a, b => a == b
+  | .bne,  a, b => a != b
+  | .blt,  a, b => a.slt b
+  | .bge,  a, b => !a.slt b
+  | .bltu, a, b => a.ult b
+  | .bgeu, a, b => !a.ult b
+
+/-- Execute a load from address `a`, extending the result to a full word.
+Generic in the pc type, so `Sym` can reuse it. -/
+def ILInstr.load {PC : Type} : ILInstr -> Machine.State PC -> Word -> Option Word
+  | .lb,  s, a => some ((s.load8 a).signExtend 32)
+  | .lbu, s, a => some ((s.load8 a).setWidth 32)
+  | .lh,  s, a => if a.toNat % 2 = 0 then some ((s.load16 a).signExtend 32) else none
+  | .lhu, s, a => if a.toNat % 2 = 0 then some ((s.load16 a).setWidth 32) else none
+  | .lw,  s, a => if a.toNat % 4 = 0 then some (s.load32 a) else none
+
+/-- Execute a store of (the low bits of) `v` to address `a`.
+Generic in the pc type, so `Sym` can reuse it. -/
+def SInstr.store {PC : Type} :
+    SInstr -> Machine.State PC -> Word -> Word -> Option (Machine.State PC)
+  | .sb, s, a, v => some (s.store8 a (v.setWidth 8))
+  | .sh, s, a, v => if a.toNat % 2 = 0 then some (s.store16 a (v.setWidth 16)) else none
+  | .sw, s, a, v => if a.toNat % 4 = 0 then some (s.store32 a v) else none
+
+namespace Program
+
+/-- Execute a single instruction. -/
+def step (s : State) : Instr -> Option State
+  | .RI op rd rs1 rs2 =>
+      some <| State.next (s.write rd (op.eval (s.read rs1) (s.read rs2)))
+  | .II op rd rs1 imm =>
+      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
+  | .IShI op rd rs1 imm =>
+      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
+  | .ILI op rd rs1 imm => do
+      let v ← op.load s (s.read rs1 + imm.signExtend 32)
+      pure <| State.next (s.write rd v)
+  | .SI op rs1 rs2 imm => do
+      let s' ← op.store s (s.read rs1 + imm.signExtend 32) (s.read rs2)
+      pure <| State.next s'
+  | .BI op rs1 rs2 off =>
+      if op.eval (s.read rs1) (s.read rs2)
+      then s.jump (s.pc + (off ++ 0#1).signExtend 32)
+      else some s.next
+  | .JI .jal rd off =>
+      State.jump (s.write rd (s.pc + 4)) (s.pc + (off ++ 0#1).signExtend 32)
+  | .jalr rd rs1 imm =>
+      -- compute the target before writing `rd`, which may equal `rs1`
+      let target := (s.read rs1 + imm.signExtend 32) &&& ~~~1
+      State.jump (s.write rd (s.pc + 4)) target
+  | .UI .lui rd imm   => some <| State.next (s.write rd (imm ++ 0#12))
+  | .UI .auipc rd imm => some <| State.next (s.write rd (s.pc + (imm ++ 0#12)))
+  | .ISysI _ => none
+
+/-- Fetch instruction from a Program for given `pc`. -/
+def fetch (p : Program) (pc : Word) : Option Instr :=
+  if pc % 4 ≠ 0 then none else p[(pc / 4).toNat]?
+
+/-- Small step relation between a state and it's successor -/
+def Step (p : Program) (s s' : State) : Prop :=
+  ∃ i, fetch p s.pc = some i ∧ step s i = s'
+
+/-- Transitive reflexive closure of `Step` -/
+inductive Step.Star (p : Program) : State -> State -> Prop
+  | refl (s) : Step.Star p s s
+  | step {s s'} : Step p s s' -> Step.Star p s s'
+  | trans {s t s'} : Step.Star p s t -> Step.Star p t s' -> Step.Star p s s'
+
+/-!
+### Termination
+A run of a program ends in one of two ways (see `Halt`):
+- `exit`: the whole process ends by making the Linux `exit` system call: `ecall` with the
+  syscall number `93` in `a7` and the exit code in `a0 % 256`.
+- `ret`: the program returns to its caller with `ret` (`jalr zero, 0(ra)`).
+  This lets `p` be a partial program, e.g. a single function, specified by the state it
+  returns in (as in `Asm.Program.Triple .ret`).
+
+In both cases the final state is the one *before* the terminating instruction, so its pc
+still points into `p`. Note that *any* `ret` counts, including that of a function `p` calls
+itself: `ret`-termination is meant for programs whose `ret`s all return from `p`.
+-/
+
+/-- The Linux `exit` syscall number. -/
+abbrev sysExit : Word := 93
+
+/-- How a run of a program ends. -/
+inductive Halt
+  /-- The process ends via the `exit` syscall, with exit code `a0`. -/
+  | exit
+  /-- The program returns to its caller, at address `ra`. -/
+  | ret
+  deriving DecidableEq, Repr
+
+/-- `s` is a final state of `p`, ending as `h` says: it is about to call `exit` (`.exit`)
+or to return to its caller (`.ret`). -/
+def Halted (p : Program) (s : State) : Halt -> Prop
+  | .exit => fetch p s.pc = some (.ISysI .ecall) ∧ s.read .a7 = sysExit
+  | .ret  => fetch p s.pc = some .ret
+
+/-- Started in `s`, program `p` reaches the final state `s'`, ending as `h` says. -/
+def Terminates (p : Program) (s s' : State) (h : Halt) : Prop :=
+  Step.Star p s s' ∧ Halted p s' h
+
+/-- Started in `s`, program `p` calls `exit` with exit code `code`. -/
+def Exits (p : Program) (s : State) (code : Word) : Prop :=
+  ∃ s', Terminates p s s' .exit ∧ s'.read .a0 = code
+
+/-- Started in `s`, program `p` returns to its caller in state `s'`. -/
+def Returns (p : Program) (s s' : State) : Prop :=
+  Terminates p s s' .ret
+
+/-- Prepend a single step to a run: the workhorse for symbolic execution in proofs. -/
+theorem Step.Star.head {p : Program} {s t u : State} (i : Instr)
+    (hf : fetch p s.pc = some i) (hs : Asm.Program.step s i = some t) (h : Step.Star p t u) :
+    Step.Star p s u :=
+  .trans (.step ⟨i, hf, hs⟩) h
+
+/-- Bounded execution: run for at most `n` steps, stopping early when execution gets stuck
+(including at `ecall`). Note that `run` does not stop at `ret`. -/
+def run (p : Program) : Nat -> State -> State
+  | 0, s => s
+  | n + 1, s =>
+    match fetch p s.pc with
+    | none => s
+    | some i =>
+      match step s i with
+      | none => s
+      | some s' => run p n s'
+
+/-- `run` is sound: it only follows `Step`s. -/
+theorem run_star (p : Program) : ∀ n s, Step.Star p s (run p n s)
+  | 0, s => .refl s
+  | n + 1, s => by
+    unfold run
+    split
+    · exact .refl s
+    · rename_i i hf
+      split
+      · exact .refl s
+      · rename_i s' hs
+        exact .trans (.step ⟨i, hf, hs⟩) (run_star p n s')
+
+end Program
+
+end Asm
+
+end Rv32i

@@ -1,5 +1,7 @@
 import Rv32i.Register
 
+namespace Rv32i
+
 /-!
 # Machine State
 The machine state shared by both the `Sym` and the `Asm` languages of the pipeline:
@@ -21,9 +23,11 @@ their results only searches `Machine.State`.
 
 namespace Machine
 
+abbrev Byte := BitVec 8
+
 structure State (PC : Type) where
   regs : Reg -> Word
-  mem  : Word -> BitVec 8
+  mem  : Word -> Byte
   pc   : PC
 
 namespace State
@@ -56,11 +60,11 @@ without unfolding the register function. -/
 
 /-! ## Memory (little-endian) -/
 
-def load8 (s : State PC) (a : Word) : BitVec 8 := s.mem a
+def load8 (s : State PC) (a : Word) : Byte := s.mem a
 def load16 (s : State PC) (a : Word) : BitVec 16 := s.load8 (a + 1) ++ s.load8 a
 def load32 (s : State PC) (a : Word) : Word := s.load16 (a + 2) ++ s.load16 a
 
-def store8 (s : State PC) (a : Word) (v : BitVec 8) : State PC :=
+def store8 (s : State PC) (a : Word) (v : Byte) : State PC :=
   { s with mem := fun x => if x = a then v else s.mem x }
 def store16 (s : State PC) (a : Word) (v : BitVec 16) : State PC :=
   (s.store8 a (v.extractLsb' 0 8)).store8 (a + 1) (v.extractLsb' 8 8)
@@ -70,3 +74,5 @@ def store32 (s : State PC) (a : Word) (v : Word) : State PC :=
 end State
 
 end Machine
+
+end Rv32i

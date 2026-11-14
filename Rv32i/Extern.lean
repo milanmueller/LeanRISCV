@@ -1,5 +1,7 @@
 import Rv32i.Asm
 
+namespace Rv32i
+
 /-!
 # External Calls (SKETCH)
 A generic interface for code we do not model instruction by instruction:
@@ -104,10 +106,10 @@ The rule for library calls is not written out below since it needs a new instruc
 The call is one atomic step: `ra` is clobbered by `Conv.c` instead of being modelled.
 -/
 
-open Asm in
-inductive _root_.Asm.XStep {W : Type} (env : Env W) (p : Program) :
+open Asm Asm.Program in
+inductive _root_.Rv32i.Asm.XStep {W : Type} (env : Env W) (p : Program) :
     State × W -> State × W -> Prop
-  | instr {s s' w} : Asm.Step p s s' -> XStep env p (s, w) (s', w)
+  | instr {s s' w} : Asm.Program.Step p s s' -> XStep env p (s, w) (s', w)
   | syscall {s s' w w' spec} :
       fetch p s.pc = some (.ISysI .ecall) ->
       env.syscall (s.read .a7) = some spec ->
@@ -115,7 +117,7 @@ inductive _root_.Asm.XStep {W : Type} (env : Env W) (p : Program) :
       XStep env p (s, w) (State.next s', w')
 
 /-- `Q` is reached on *every* run from `c`, and no run gets stuck before.
-With nondeterministic steps, `∃ c', Star c c' ∧ Q c'` (as in `Asm.Terminates`) is too
+With nondeterministic steps, `∃ c', Star c c' ∧ Q c'` (as in `Asm.Program.Terminates`) is too
 weak: it would let us pick the `malloc` result that happens to make the program work. -/
 inductive Eventually {C : Type} (Step : C -> C -> Prop) (Q : C -> Prop) : C -> Prop
   | done {c} : Q c -> Eventually Step Q c
@@ -191,3 +193,5 @@ def linux : Env World where
     | _        => none
 
 end Extern
+
+end Rv32i
