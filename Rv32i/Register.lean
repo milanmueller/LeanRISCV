@@ -42,7 +42,7 @@ instance : ToString Reg := ⟨abiName⟩
 /-- Registers that may be used as destination of ordinary operations by convention.
 Excluded are the special-purpose registers:
 `zero` (writes are discarded), `ra` (return address), `sp`, `gp` and `tp`. -/
-def isDest : Reg -> Bool
+def isDest : Reg → Bool
   | zero | ra | sp | gp | tp => false
   | _ => true
 

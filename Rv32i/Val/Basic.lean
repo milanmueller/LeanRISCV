@@ -11,7 +11,7 @@ and a notion of pointers. It compiles to `Sym`.
 /-
 This Sketch has some issues:
 * Stack is unbounded, which would require spilling onto heap
-  -> Put that one abstraction higher..
+  → Put that one abstraction higher..
 * No notion of termination
 * In general, should be closer to `Sym` for easier compilation...
 -/
@@ -25,8 +25,8 @@ namespace Val
 abbrev Var := String
 
 structure State where
-  stack : Var -> Option Word
-  heap  : Word -> Option Machine.Byte
+  stack : Var → Option Word
+  heap  : Word → Option Machine.Byte
 
 inductive Val
   | V (var : Var) | C (const : Word)

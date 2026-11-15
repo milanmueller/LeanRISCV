@@ -1,4 +1,4 @@
-import Rv32i.Machine
+import Rv32i.Library
 
 namespace Rv32i
 
@@ -57,14 +57,6 @@ instance : ToString ILInstr where
     | .lb => "lb" | .lh => "lh" | .lw => "lw"
     | .lbu => "lbu" | .lhu => "lhu"
 
-inductive ISysInstr
-  | ecall
-  deriving DecidableEq, BEq, Inhabited
-
-instance : ToString ISysInstr where
-  toString : ISysInstr -> String
-    | .ecall => "ecall"
-
 inductive SInstr
   | sb | sh | sw
   deriving DecidableEq, BEq, Inhabited
@@ -102,6 +94,9 @@ instance : ToString UInstr where
 ## Instructions
 -/
 
+section
+variable (ℓ : Library)
+
 /-- Instructions with numeric jump targets.
 Branch / jump offsets are in units of 2 bytes (the implicit bit 0 is not encoded),
 so an offset `n` means a byte offset of `2 * n` relative to the jumping instruction. -/
@@ -110,43 +105,44 @@ inductive Instr
   | II (instr : IInstr) (rd : Reg) (rs1 : Reg) (imm : Imm12)
   | IShI (instr : IShInstr) (rd : Reg) (rs1 : Reg) (imm : Imm5)
   | ILI (instr : ILInstr) (rd : Reg) (rs1 : Reg) (imm : Imm12)
-  | ISysI (instr : ISysInstr)
   | SI (instr : SInstr) (rs1 : Reg) (rs2 : Reg) (imm : Imm12)
   | BI (instr : BInstr) (rs1 : Reg) (rs2 : Reg) (offset : Imm12)
   | JI (instr : JInstr) (rd : Reg) (offset : Imm20)
-  /-- Jump to the address `rs1 + imm` (bit 0 cleared), storing `pc + 4` in `rd`. -/
-  | jalr (rd : Reg) (rs1 : Reg) (imm : Imm12)
   | UI (instr : UInstr) (rd : Reg) (imm : Imm20)
+  | jalr (rd : Reg) (rs1 : Reg) (imm : Imm12)
+  -- Pseudo insructions we use in `Asm`
+  | call (target : ℓ.Function) -- Calling external functions
 
-instance : ToString Instr where
-  toString : Instr -> String
+instance : ToString (Instr ℓ) where
+  toString : (Instr ℓ) -> String
     | .RI i rd rs1 rs2   => s!"{i} {rd.abiName}, {rs1.abiName}, {rs2.abiName}"
     | .II i rd rs1 imm   => s!"{i} {rd.abiName}, {rs1.abiName}, {imm.toInt}"
     | .IShI i rd rs1 imm => s!"{i} {rd.abiName}, {rs1.abiName}, {imm.toNat}"
     | .ILI i rd rs1 imm  => s!"{i} {rd.abiName}, {imm.toInt}({rs1.abiName})"
-    | .ISysI i           => s!"{i}"
     | .SI i rs1 rs2 imm  => s!"{i} {rs2.abiName}, {imm.toInt}({rs1.abiName})"
     | .BI i rs1 rs2 off  => s!"{i} {rs1.abiName}, {rs2.abiName}, . + {2 * off.toInt}"
     | .JI i rd off       => s!"{i} {rd.abiName}, . + {2 * off.toInt}"
-    | .jalr rd rs1 imm   => s!"jalr {rd.abiName}, {imm.toInt}({rs1.abiName})"
     | .UI i rd imm       => s!"{i} {rd.abiName}, {imm.toNat}"
+    | .jalr rd rs1 imm   => s!"jalr {rd.abiName}, {imm.toInt}({rs1.abiName})"
+    | .call target       => s!"call {target}"
 
 /-- The `ret` pseudo instruction: return to the caller, i.e. jump to the address in `ra`. -/
-abbrev Instr.ret : Instr := .jalr .zero .ra 0
+abbrev Instr.ret : (Instr ℓ) := .jalr .zero .ra 0
 
 /-!
 ### Programs
-Other than in `Sym`, we don't support symbolic targets.
-Programs are represented as a flat list of instructions.
 -/
 
-abbrev Program := List Instr
+abbrev Program := List (Instr ℓ)
+
+-- From here on the library is inferred from the program / instruction.
+variable {ℓ}
 
 /--
 Render a program as a complete assembly file.
 The program is a single `_start` block, so instruction `i` sits at byte offset `4 * i`.
  -/
-def Program.render (p : Program) : String :=
+def Program.render (p : Program ℓ) : String :=
   let preamble :=
     [ ".option norvc"   -- no compressed instructions: keeps `. + n` offsets exact
     , ".text"           -- following lines are code
@@ -235,123 +231,94 @@ def SInstr.store {PC : Type} :
 namespace Program
 
 /-- Execute a single instruction. -/
-def step (s : State) : Instr -> Option State
+def step (s : State) (w : ℓ.World) : (Instr ℓ) -> Option (State × ℓ.World)
   | .RI op rd rs1 rs2 =>
-      some <| State.next (s.write rd (op.eval (s.read rs1) (s.read rs2)))
+      some <| (State.next (s.write rd (op.eval (s.read rs1) (s.read rs2))), w)
   | .II op rd rs1 imm =>
-      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
+      some <| (State.next (s.write rd (op.eval (s.read rs1) imm)), w)
   | .IShI op rd rs1 imm =>
-      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
+      some <| (State.next (s.write rd (op.eval (s.read rs1) imm)), w)
   | .ILI op rd rs1 imm => do
       let v ← op.load s (s.read rs1 + imm.signExtend 32)
-      pure <| State.next (s.write rd v)
+      pure <| (State.next (s.write rd v), w)
   | .SI op rs1 rs2 imm => do
       let s' ← op.store s (s.read rs1 + imm.signExtend 32) (s.read rs2)
-      pure <| State.next s'
+      pure <| (State.next s', w)
   | .BI op rs1 rs2 off =>
       if op.eval (s.read rs1) (s.read rs2)
-      then s.jump (s.pc + (off ++ 0#1).signExtend 32)
-      else some s.next
-  | .JI .jal rd off =>
-      State.jump (s.write rd (s.pc + 4)) (s.pc + (off ++ 0#1).signExtend 32)
-  | .jalr rd rs1 imm =>
+      then do
+        let s' <- s.jump (s.pc + (off ++ 0#1).signExtend 32)
+        pure <| (s', w)
+      else some (s.next, w)
+  | .JI .jal rd off => do
+      let s' <- State.jump (s.write rd (s.pc + 4)) (s.pc + (off ++ 0#1).signExtend 32)
+      pure <| (s', w)
+  | .UI .lui rd imm   => do
+    let s' <- State.next (s.write rd (imm ++ 0#12))
+    pure (s', w)
+  | .UI .auipc rd imm => do
+    let s' <- State.next (s.write rd (s.pc + (imm ++ 0#12)))
+    pure (s', w)
+  | .jalr rd rs1 imm => do
       -- compute the target before writing `rd`, which may equal `rs1`
       let target := (s.read rs1 + imm.signExtend 32) &&& ~~~1
-      State.jump (s.write rd (s.pc + 4)) target
-  | .UI .lui rd imm   => some <| State.next (s.write rd (imm ++ 0#12))
-  | .UI .auipc rd imm => some <| State.next (s.write rd (s.pc + (imm ++ 0#12)))
-  | .ISysI _ => none
+      let s' <- State.jump (s.write rd (s.pc + 4)) target
+      pure (s', w)
+  | .call target => do
+      -- library semantics are generic in the pc, so they cannot advance it themselves
+      let (s', w') <- ℓ.semantics target s w
+      pure (State.next s', w')
 
 /-- Fetch instruction from a Program for given `pc`. -/
-def fetch (p : Program) (pc : Word) : Option Instr :=
+def fetch (p : Program ℓ) (pc : Word) : Option (Instr ℓ) :=
   if pc % 4 ≠ 0 then none else p[(pc / 4).toNat]?
 
-/-- Small step relation between a state and it's successor -/
-def Step (p : Program) (s s' : State) : Prop :=
-  ∃ i, fetch p s.pc = some i ∧ step s i = s'
+/-- Small step relation between a configuration (machine state and library world)
+and its successor. -/
+def Step (p : Program ℓ) (s s' : State) (w w' : ℓ.World) : Prop :=
+  ∃ i, fetch p s.pc = some i ∧ step s w i = some (s', w')
 
 /-- Transitive reflexive closure of `Step` -/
-inductive Step.Star (p : Program) : State -> State -> Prop
-  | refl (s) : Step.Star p s s
-  | step {s s'} : Step p s s' -> Step.Star p s s'
-  | trans {s t s'} : Step.Star p s t -> Step.Star p t s' -> Step.Star p s s'
-
-/-!
-### Termination
-A run of a program ends in one of two ways (see `Halt`):
-- `exit`: the whole process ends by making the Linux `exit` system call: `ecall` with the
-  syscall number `93` in `a7` and the exit code in `a0 % 256`.
-- `ret`: the program returns to its caller with `ret` (`jalr zero, 0(ra)`).
-  This lets `p` be a partial program, e.g. a single function, specified by the state it
-  returns in (as in `Asm.Program.Triple .ret`).
-
-In both cases the final state is the one *before* the terminating instruction, so its pc
-still points into `p`. Note that *any* `ret` counts, including that of a function `p` calls
-itself: `ret`-termination is meant for programs whose `ret`s all return from `p`.
--/
-
-/-- The Linux `exit` syscall number. -/
-abbrev sysExit : Word := 93
-
-/-- How a run of a program ends. -/
-inductive Halt
-  /-- The process ends via the `exit` syscall, with exit code `a0`. -/
-  | exit
-  /-- The program returns to its caller, at address `ra`. -/
-  | ret
-  deriving DecidableEq, Repr
-
-/-- `s` is a final state of `p`, ending as `h` says: it is about to call `exit` (`.exit`)
-or to return to its caller (`.ret`). -/
-def Halted (p : Program) (s : State) : Halt -> Prop
-  | .exit => fetch p s.pc = some (.ISysI .ecall) ∧ s.read .a7 = sysExit
-  | .ret  => fetch p s.pc = some .ret
-
-/-- Started in `s`, program `p` reaches the final state `s'`, ending as `h` says. -/
-def Terminates (p : Program) (s s' : State) (h : Halt) : Prop :=
-  Step.Star p s s' ∧ Halted p s' h
-
-/-- Started in `s`, program `p` calls `exit` with exit code `code`. -/
-def Exits (p : Program) (s : State) (code : Word) : Prop :=
-  ∃ s', Terminates p s s' .exit ∧ s'.read .a0 = code
-
-/-- Started in `s`, program `p` returns to its caller in state `s'`. -/
-def Returns (p : Program) (s s' : State) : Prop :=
-  Terminates p s s' .ret
+inductive Step.Star (p : Program ℓ) : State -> State -> ℓ.World -> ℓ.World -> Prop
+  | refl (s w) : Step.Star p s s w w
+  | step {s s' w w'} : Step p s s' w w' -> Step.Star p s s' w w'
+  | trans {s t s' w v w'} :
+      Step.Star p s t w v -> Step.Star p t s' v w' -> Step.Star p s s' w w'
 
 /-- Prepend a single step to a run: the workhorse for symbolic execution in proofs. -/
-theorem Step.Star.head {p : Program} {s t u : State} (i : Instr)
-    (hf : fetch p s.pc = some i) (hs : Asm.Program.step s i = some t) (h : Step.Star p t u) :
-    Step.Star p s u :=
+theorem Step.Star.head {p : Program ℓ} {s t u : State} {w v x : ℓ.World} (i : Instr ℓ)
+    (hf : fetch p s.pc = some i) (hs : Program.step s w i = some (t, v))
+    (h : Step.Star p t u v x) : Step.Star p s u w x :=
   .trans (.step ⟨i, hf, hs⟩) h
 
-/-- Bounded execution: run for at most `n` steps, stopping early when execution gets stuck
-(including at `ecall`). Note that `run` does not stop at `ret`. -/
-def run (p : Program) : Nat -> State -> State
-  | 0, s => s
-  | n + 1, s =>
+/-- Bounded execution: run for at most `n` steps, stopping early when execution gets stuck.
+Note that `run` does not stop at `ret`. -/
+def run (p : Program ℓ) : Nat -> State -> ℓ.World -> State × ℓ.World
+  | 0, s, w => (s, w)
+  | n + 1, s, w =>
     match fetch p s.pc with
-    | none => s
+    | none => (s, w)
     | some i =>
-      match step s i with
-      | none => s
-      | some s' => run p n s'
+      match step s w i with
+      | none => (s, w)
+      | some (s', w') => run p n s' w'
 
 /-- `run` is sound: it only follows `Step`s. -/
-theorem run_star (p : Program) : ∀ n s, Step.Star p s (run p n s)
-  | 0, s => .refl s
-  | n + 1, s => by
+theorem run_star (p : Program ℓ) :
+    ∀ n s w, Step.Star p s (run p n s w).1 w (run p n s w).2
+  | 0, s, w => .refl s w
+  | n + 1, s, w => by
     unfold run
     split
-    · exact .refl s
+    · exact .refl s w
     · rename_i i hf
       split
-      · exact .refl s
-      · rename_i s' hs
-        exact .trans (.step ⟨i, hf, hs⟩) (run_star p n s')
+      · exact .refl s w
+      · rename_i s' w' hs
+        exact .trans (.step ⟨i, hf, hs⟩) (run_star p n s' w')
 
 end Program
-
+end -- Section with `ℓ : Library` variable
 end Asm
 
 end Rv32i

@@ -6,7 +6,7 @@ namespace Rv32i
 # Machine State
 The machine state shared by both the `Sym` and the `Asm` languages of the pipeline:
 - A total valuation of registers.
-- Byte-addressed memory `Word -> BitVec 8` (little-endian, like RISC-V).
+- Byte-addressed memory `Word → BitVec 8` (little-endian, like RISC-V).
 - A program counter of type `PC`.
 
 Languages only differ in how they represent the program counter:
@@ -26,8 +26,8 @@ namespace Machine
 abbrev Byte := BitVec 8
 
 structure State (PC : Type) where
-  regs : Reg -> Word
-  mem  : Word -> Byte
+  regs : Reg → Word
+  mem  : Word → Byte
   pc   : PC
 
 namespace State
