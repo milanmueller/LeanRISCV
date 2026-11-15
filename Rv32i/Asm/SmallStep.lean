@@ -1,11 +1,11 @@
-import Rv32i.Library
+import Rv32i.Library.Core
 
 namespace Rv32i
 
 /-!
 # `Asm` Language
 The final language of the compilation/refinement pipeline.
-(Pretty-) printing `Asm.Program` results in valid RISC-V assembly.
+(Pretty-) printing `Asm.Program` results in valid RISC-V assembly (see `Asm.Compile`).
 
 Jump targets are numeric, pc-relative offsets, and `jalr` jumps to a computed address.
 The instruction kinds (`RInstr`, `IInstr`, ...) defined here are shared with `Sym`.
@@ -124,7 +124,8 @@ instance : ToString (Instr ℓ) where
     | .JI i rd off       => s!"{i} {rd.abiName}, . + {2 * off.toInt}"
     | .UI i rd imm       => s!"{i} {rd.abiName}, {imm.toNat}"
     | .jalr rd rs1 imm   => s!"jalr {rd.abiName}, {imm.toInt}({rs1.abiName})"
-    | .call target       => s!"call {target}"
+    -- not the `call` pseudo instruction, which the assembler expands to 8 bytes
+    | .call target       => s!"jal ra, {target}"
 
 /-- The `ret` pseudo instruction: return to the caller, i.e. jump to the address in `ra`. -/
 abbrev Instr.ret : (Instr ℓ) := .jalr .zero .ra 0
@@ -137,18 +138,6 @@ abbrev Program := List (Instr ℓ)
 
 -- From here on the library is inferred from the program / instruction.
 variable {ℓ}
-
-/--
-Render a program as a complete assembly file.
-The program is a single `_start` block, so instruction `i` sits at byte offset `4 * i`.
- -/
-def Program.render (p : Program ℓ) : String :=
-  let preamble :=
-    [ ".option norvc"   -- no compressed instructions: keeps `. + n` offsets exact
-    , ".text"           -- following lines are code
-    , ".globl _start"   -- export `_start`, the linker's default entry
-    , "_start:" ]
-  String.intercalate "\n" (preamble ++ p.map (s!"  {·}")) ++ "\n"
 
 /-!
 ## Semantics
@@ -212,8 +201,8 @@ def BInstr.eval : BInstr -> Word -> Word -> Bool
   | .bgeu, a, b => !a.ult b
 
 /-- Execute a load from address `a`, extending the result to a full word.
-Generic in the pc type, so `Sym` can reuse it. -/
-def ILInstr.load {PC : Type} : ILInstr -> Machine.State PC -> Word -> Option Word
+Independent of the pc, so `Sym` can reuse it. -/
+def ILInstr.load : ILInstr -> Machine.Core -> Word -> Option Word
   | .lb,  s, a => some ((s.load8 a).signExtend 32)
   | .lbu, s, a => some ((s.load8 a).setWidth 32)
   | .lh,  s, a => if a.toNat % 2 = 0 then some ((s.load16 a).signExtend 32) else none
@@ -239,7 +228,7 @@ def step (s : State) (w : ℓ.World) : (Instr ℓ) -> Option (State × ℓ.World
   | .IShI op rd rs1 imm =>
       some <| (State.next (s.write rd (op.eval (s.read rs1) imm)), w)
   | .ILI op rd rs1 imm => do
-      let v ← op.load s (s.read rs1 + imm.signExtend 32)
+      let v ← op.load s.toCore (s.read rs1 + imm.signExtend 32)
       pure <| (State.next (s.write rd v), w)
   | .SI op rs1 rs2 imm => do
       let s' ← op.store s (s.read rs1 + imm.signExtend 32) (s.read rs2)
@@ -265,9 +254,10 @@ def step (s : State) (w : ℓ.World) : (Instr ℓ) -> Option (State × ℓ.World
       let s' <- State.jump (s.write rd (s.pc + 4)) target
       pure (s', w)
   | .call target => do
-      -- library semantics are generic in the pc, so they cannot advance it themselves
-      let (s', w') <- ℓ.semantics target s w
-      pure (State.next s', w')
+      -- the library only sees registers and memory; we advance the pc ourselves.
+      -- Like `jal ra`, the call leaves the return address in `ra`, where the library sees it.
+      let (c', w') <- ℓ.semantics target (s.write .ra (s.pc + 4)).toCore w
+      pure (State.next (s.withCore c'), w')
 
 /-- Fetch instruction from a Program for given `pc`. -/
 def fetch (p : Program ℓ) (pc : Word) : Option (Instr ℓ) :=

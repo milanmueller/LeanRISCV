@@ -1,4 +1,4 @@
-import Rv32i.Asm.Basic
+import Rv32i.Asm.SmallStep
 
 namespace Rv32i
 
@@ -56,7 +56,7 @@ variable (ℓ : Library)
 Instructions are parameterized over a type `α` of external labels/functions.
 The default is in inductive type of selected Syscalls and libc functions with axiomatized semantics.
 -/
-inductive Instr (α : Type)
+inductive Instr
 
   -- Standard instructions inherited from `Asm` 
   | RI (instr : RInstr) (rd : Reg) (rs1 : Reg) (rs2 : Reg)
@@ -71,11 +71,11 @@ inductive Instr (α : Type)
   -- Unconditional jump to `target`, return to `ret` once done
   | Jump (target : Label) (ret : Label)
   -- Call external function `target`, return to `ret` once done
-  | Call (target : α) (ret : Label)
+  | Call (target : ℓ.Function) (ret : Label)
   /-- Return to the block on top of the call stack. -/
   | Ret
 
-def Instr.isTerminal : Instr α → Bool
+def Instr.isTerminal : Instr ℓ → Bool
   | .BI _ _ _ _ _ => true
   | .Jump _ _     => true
   | .Call _ _     => true
@@ -86,27 +86,29 @@ def Instr.isTerminal : Instr α → Bool
 ### Programs
 -/
 
-structure Block (α : Type) where
-  instrs : List (Instr α)
+structure Block where
+  instrs : List (Instr ℓ)
   neq    : instrs ≠ []
   term   : (instrs.getLast neq).isTerminal
   wf     : instrs.dropLast.all (fun i => ¬i.isTerminal)
 
-def Instr.lsOut : Instr α → List Label
+def Instr.lsOut : Instr ℓ → List Label
   | BI _ _ _ t f => [t, f]
   | Jump t _     => [t]
   | _            => []
 
-def Block.lsOut (b : Block α) : List Label :=
-  b.instrs.flatMap Instr.lsOut
+def Block.lsOut (b : Block ℓ) : List Label :=
+  b.instrs.flatMap (Instr.lsOut ℓ)
 
-structure Program (α : Type) where
-  blocks : List (Block α)
+structure Program where
+  blocks : List (Block ℓ)
   nempty : blocks ≠ []
   wf : ∀ b ∈ blocks, ∀ l ∈ b.lsOut, l < blocks.length
 
+-- From here on the library is inferred from the program / instruction.
+variable {ℓ}
 
-def Program.fetch (p : Program α) (pc : PC) : Option (Instr α) := do
+def Program.fetch (p : Program ℓ) (pc : PC) : Option (Instr ℓ) := do
   let b ← p.blocks[pc.block]?
   b.instrs[pc.idx]?
 
@@ -135,70 +137,75 @@ end State
 
 namespace Program
 
-def step (s : State) : Instr α → Option State
+def step (s : State) (w : ℓ.World) : Instr ℓ → Option (State × ℓ.World)
   | .RI op rd rs1 rs2 =>
-      some <| State.next (s.write rd (op.eval (s.read rs1) (s.read rs2)))
+      some <| (State.next (s.write rd (op.eval (s.read rs1) (s.read rs2))), w)
   | .II op rd rs1 imm =>
-      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
+      some <| (State.next (s.write rd (op.eval (s.read rs1) imm)), w)
   | .IShI op rd rs1 imm =>
-      some <| State.next (s.write rd (op.eval (s.read rs1) imm))
+      some <| (State.next (s.write rd (op.eval (s.read rs1) imm)), w)
   | .ILI op rd rs1 imm => do
-      let v ← op.load s (s.read rs1 + imm.signExtend 32)
-      pure <| State.next (s.write rd v)
+      let v ← op.load s.toCore (s.read rs1 + imm.signExtend 32)
+      pure <| (State.next (s.write rd v), w)
   | .SI op rs1 rs2 imm => do
       let s' ← op.store s (s.read rs1 + imm.signExtend 32) (s.read rs2)
-      pure <| State.next s'
+      pure <| (State.next s', w)
   | .BI op rs1 rs2 tt tf =>
       if op.eval (s.read rs1) (s.read rs2)
-      then some (s.jump tt)
-      else some (s.jump tf)
-  | .Jump t r => some ((s.push r).jump t)
-  | .Call f ret =>
-    -- TODO: Define semantics for `Call`
-    s
+      then some (s.jump tt, w)
+      else some (s.jump tf, w)
+  | .Jump t r => some ((s.push r).jump t, w)
+  | .Call f ret => do
+      -- the library only sees registers and memory; we continue at `ret` ourselves
+      let (c', w') <- ℓ.semantics f s.toCore w
+      pure (State.jump (s.withCore c') ret, w')
   | .Ret =>
       match s.pc.callstack with
       | [] => none
-      | ret :: rest => some { s with pc := ⟨ret, 0, rest⟩ }
+      | ret :: rest => some ({ s with pc := ⟨ret, 0, rest⟩ }, w)
 
--- Relation view on `step`
-def Step (p : Program α) (s s' : State) : Prop :=
-  ∃ i, p.fetch s.pc = some i ∧ step s i = some s'
+/-- Small step relation between a configuration (machine state and library world)
+and its successor. -/
+def Step (p : Program ℓ) (s s' : State) (w w' : ℓ.World) : Prop :=
+  ∃ i, p.fetch s.pc = some i ∧ step s w i = some (s', w')
 
--- Transitive reflexive closure of `Step`
-inductive Step.Star (p : Program α) : State → State → Prop
-  | refl (s) : Step.Star p s s
-  | step {s s'} : Step p s s' → Step.Star p s s'
-  | trans {s t s'} : Step.Star p s t → Step.Star p t s' → Step.Star p s s'
+/-- Transitive reflexive closure of `Step` -/
+inductive Step.Star (p : Program ℓ) : State → State → ℓ.World → ℓ.World → Prop
+  | refl (s w) : Step.Star p s s w w
+  | step {s s' w w'} : Step p s s' w w' → Step.Star p s s' w w'
+  | trans {s t s' w v w'} :
+      Step.Star p s t w v → Step.Star p t s' v w' → Step.Star p s s' w w'
 
 /-- Prepend a single step to a run. -/
-theorem Step.Star.head {p : Program α} {s t u : State} (i : Instr α)
-    (hf : p.fetch s.pc = some i) (hs : Sym.Program.step s i = some t) (h : Step.Star p t u) :
-    Step.Star p s u :=
+theorem Step.Star.head {p : Program ℓ} {s t u : State} {w v x : ℓ.World} (i : Instr ℓ)
+    (hf : p.fetch s.pc = some i) (hs : Program.step s w i = some (t, v))
+    (h : Step.Star p t u v x) : Step.Star p s u w x :=
   .trans (.step ⟨i, hf, hs⟩) h
 
--- Bounded execution
-def run (p : Program α) : Nat → State → State
-  | 0, s => s
-  | n + 1, s =>
+/-- Bounded execution: run for at most `n` steps, stopping early when execution gets stuck. -/
+def run (p : Program ℓ) : Nat → State → ℓ.World → State × ℓ.World
+  | 0, s, w => (s, w)
+  | n + 1, s, w =>
     match p.fetch s.pc with
-    | none => s
+    | none => (s, w)
     | some i =>
-      match step s i with
-      | none => s
-      | some s' => run p n s'
+      match step s w i with
+      | none => (s, w)
+      | some (s', w') => run p n s' w'
 
-theorem run_star (p : Program α) : ∀ n s, Step.Star p s (run p n s)
-  | 0, s => .refl s
-  | n + 1, s => by
+/-- `run` is sound: it only follows `Step`s. -/
+theorem run_star (p : Program ℓ) :
+    ∀ n s w, Step.Star p s (run p n s w).1 w (run p n s w).2
+  | 0, s, w => .refl s w
+  | n + 1, s, w => by
     unfold run
     split
-    · exact .refl s
+    · exact .refl s w
     · rename_i i hf
       split
-      · exact .refl s
-      · rename_i s' hs
-        exact .trans (.step ⟨i, hf, hs⟩) (run_star p n s')
+      · exact .refl s w
+      · rename_i s' w' hs
+        exact .trans (.step ⟨i, hf, hs⟩) (run_star p n s' w')
 
 end Program
 end -- Section with fixed `ℓ : Library`
