@@ -12,9 +12,20 @@ The restriction to symbolic targets allows for defining programs as (possibly cy
 
 `Sym` reuses the instruction kinds of `Asm` (`RInstr`, `IInstr`, ...), which map 1-to-1.
 
-Function calls are structured: `Call f ret` jumps to `f` and remembers the block `ret` to
-continue with on a call stack, `Ret` pops it.
-The call stack is part of the symbolic program counter.
+## The stack
+`Sym` has an abstract stack, which is part of the symbolic program counter. It holds
+* return blocks: `Jump f ret` jumps to `f` and pushes the block `ret` to continue with,
+  `Ret` pops it;
+* spilled words: `Push rs` and `Pop rd`.
+
+`Ret` needs a return block on top of the stack and `Pop` a word, so a block has to pop
+everything it pushed before it returns.
+
+Programs cannot touch the stack in any other way: `sp` is not a `Sym` register, and
+the memory the compiled program keeps the stack in is protected. With `n` entries on the
+stack, these are the `4 * n` bytes starting at `sp`, and loads from and stores to them
+are stuck. The stack instructions move `sp` accordingly, but do not write to memory:
+the entries only exist in the abstract stack.
 
 -/
 
@@ -28,22 +39,27 @@ open Asm (Imm5 Imm12 Imm20
 namespace Sym
 
 /-
-`Sym` does not read from, or write into `ra`, as it models control flow through a callstack.
-We hence exclude `ra` from the available registers.
+`Sym` does not read from, or write into `ra` and `sp`, as it models control flow and
+spilling through an abstract stack. We hence exclude both from the available registers.
 -/
-abbrev Reg := { r : Rv32i.Reg // r ≠ .ra }
+abbrev Reg := { r : Rv32i.Reg // r ≠ .ra ∧ r ≠ .sp }
 
 -- Internal unique labels
 abbrev Label := Nat
 
+/-- An entry of the stack: a block to return to, or a spilled word. -/
+inductive Entry
+  | ret (l : Label)
+  | val (w : Word)
+  deriving DecidableEq, Repr
+
 /--
-The symbolic program counter: a program point `(block, idx)`.
-Callstack is a LIFO queue of Labels.
+The symbolic program counter: a program point `(block, idx)`, and the stack (top first).
  -/
 structure PC where
-  block     : Label
-  idx       : Nat
-  callstack : List Label
+  block : Label
+  idx   : Nat
+  stack : List Entry
   deriving DecidableEq, Repr
 
 abbrev State := Machine.State PC
@@ -72,8 +88,12 @@ inductive Instr
   | Jump (target : Label) (ret : Label)
   -- Call external function `target`, return to `ret` once done
   | Call (target : ℓ.Function) (ret : Label)
-  /-- Return to the block on top of the call stack. -/
+  /-- Return to the block on top of the stack. -/
   | Ret
+  /-- Spill `rs` onto the stack. -/
+  | Push (rs : Reg)
+  /-- Pop the word on top of the stack into `rd`. -/
+  | Pop (rd : Reg)
 
 def Instr.isTerminal : Instr ℓ → Bool
   | .BI _ _ _ _ _ => true
@@ -127,11 +147,27 @@ def next (s : State) : State := { s with pc := { s.pc with idx := s.pc.idx + 1 }
 def jump (s : State) (target : Label) : State :=
   { s with pc := { s.pc with block := target, idx := 0 } }
 
-def push (s : State) (ret : Label) : State :=
-  { s with pc := { s.pc with callstack := ret :: s.pc.callstack } }
+/-- Push an entry onto the stack, which grows downwards by one word. -/
+def push (s : State) (e : Entry) : State :=
+  let s := s.write .sp (s.read .sp - 4)
+  { s with pc := { s.pc with stack := e :: s.pc.stack } }
 
+/-- Drop the top entry, leaving the stack `rest`. -/
+def pop (s : State) (rest : List Entry) : State :=
+  let s := s.write .sp (s.read .sp + 4)
+  { s with pc := { s.pc with stack := rest } }
+
+/-- Whether an access to the `n` bytes at address `a` touches the memory of the stack:
+the `4 * s.pc.stack.length` bytes at `sp`. Addresses wrap around, so this is the case if
+`a` lies in the stack, or if the stack starts within the accessed bytes. -/
+def isProtected (s : State) (a : Word) (n : Nat) : Bool :=
+  let sp := s.read .sp
+  (a - sp).toNat < 4 * s.pc.stack.length || (s.pc.stack ≠ [] && (sp - a).toNat < n)
+
+/-- Execution starts at the first block with an empty stack.
+`sp` only ever moves by whole words, so it stays aligned. -/
 def initial (s : State) : Prop :=
-  s.pc = ⟨0, 0, []⟩
+  s.pc = ⟨0, 0, []⟩ ∧ (s.read .sp).toNat % 4 = 0
 
 end State
 
@@ -144,25 +180,35 @@ def step (s : State) (w : ℓ.World) : Instr ℓ → Option (State × ℓ.World)
       some <| (State.next (s.write rd (op.eval (s.read rs1) imm)), w)
   | .IShI op rd rs1 imm =>
       some <| (State.next (s.write rd (op.eval (s.read rs1) imm)), w)
+  -- Loads and stores are stuck if they touch the memory of the stack.
   | .ILI op rd rs1 imm => do
-      let v ← op.load s.toCore (s.read rs1 + imm.signExtend 32)
+      let a := s.read rs1 + imm.signExtend 32
+      if s.isProtected a op.width then none
+      let v ← op.load s.toCore a
       pure <| (State.next (s.write rd v), w)
   | .SI op rs1 rs2 imm => do
-      let s' ← op.store s (s.read rs1 + imm.signExtend 32) (s.read rs2)
+      let a := s.read rs1 + imm.signExtend 32
+      if s.isProtected a op.width then none
+      let s' ← op.store s a (s.read rs2)
       pure <| (State.next s', w)
   | .BI op rs1 rs2 tt tf =>
       if op.eval (s.read rs1) (s.read rs2)
       then some (s.jump tt, w)
       else some (s.jump tf, w)
-  | .Jump t r => some ((s.push r).jump t, w)
+  | .Jump t r => some ((s.push (.ret r)).jump t, w)
   | .Call f ret => do
       -- the library only sees registers and memory; we continue at `ret` ourselves
       let (c', w') <- ℓ.semantics f s.toCore w
       pure (State.jump (s.withCore c') ret, w')
   | .Ret =>
-      match s.pc.callstack with
-      | [] => none
-      | ret :: rest => some ({ s with pc := ⟨ret, 0, rest⟩ }, w)
+      match s.pc.stack with
+      | .ret l :: rest => some ((s.pop rest).jump l, w)
+      | _ => none
+  | .Push rs => some (State.next (s.push (.val (s.read rs))), w)
+  | .Pop rd =>
+      match s.pc.stack with
+      | .val v :: rest => some (State.next ((s.pop rest).write rd v), w)
+      | _ => none
 
 /-- Small step relation between a configuration (machine state and library world)
 and its successor. -/

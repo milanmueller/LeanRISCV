@@ -200,6 +200,18 @@ def BInstr.eval : BInstr -> Word -> Word -> Bool
   | .bltu, a, b => a.ult b
   | .bgeu, a, b => !a.ult b
 
+/-- The number of bytes a load reads. -/
+def ILInstr.width : ILInstr -> Nat
+  | .lb | .lbu => 1
+  | .lh | .lhu => 2
+  | .lw        => 4
+
+/-- The number of bytes a store writes. -/
+def SInstr.width : SInstr -> Nat
+  | .sb => 1
+  | .sh => 2
+  | .sw => 4
+
 /-- Execute a load from address `a`, extending the result to a full word.
 Independent of the pc, so `Sym` can reuse it. -/
 def ILInstr.load : ILInstr -> Machine.Core -> Word -> Option Word
