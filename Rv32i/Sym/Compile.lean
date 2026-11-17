@@ -1,4 +1,4 @@
-import Rv32i.Sym.SmallStep
+import Rv32i.Sym.BigStep
 
 namespace Rv32i.Sym
 
@@ -117,5 +117,6 @@ def compileBlocks (start : Label → Nat) : Nat → List (Block ℓ) → List (A
 instructions have no address, and jumps to them are out of range. -/
 def Program.compile (p : Program ℓ) : Option (Asm.Program ℓ) :=
   if 4 * p.size ≤ 2 ^ 32 then some (compileBlocks p.offset 0 p.blocks) else none
+
 
 end Rv32i.Sym

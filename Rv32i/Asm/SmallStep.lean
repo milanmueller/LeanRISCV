@@ -150,19 +150,23 @@ abbrev State := Machine.State Word
 ### Byte-address pc
 -/
 
-/-- Continue with the next instruction. -/
-def State.next (s : State) : State := { s with pc := s.pc + 4 }
+namespace State
 
-@[simp] theorem State.next_pc (s : State) : (State.next s).pc = s.pc + 4 := rfl
-@[simp] theorem State.next_read (s : State) (r : Reg) :
+/-- Continue with the next instruction. -/
+def next (s : State) : State := { s with pc := s.pc + 4 }
+
+@[simp] theorem next_pc (s : State) : (State.next s).pc = s.pc + 4 := rfl
+@[simp] theorem next_read (s : State) (r : Reg) :
     (State.next s).read r = s.read r := rfl
 
 /-- Jump to `target`, getting stuck if it is not 4-byte aligned. -/
-def State.jump (s : State) (target : Word) : Option State :=
+def jump (s : State) (target : Word) : Option State :=
   if target.toNat % 4 = 0 then some { s with pc := target } else none
 
-def State.initial (s : State) : Prop :=
-  s.pc = 0
+def initial (s : State) : Prop :=
+  s.pc = 0  
+
+end State
 
 /-! ### Operations -/
 
@@ -229,10 +233,8 @@ def SInstr.store {PC : Type} :
   | .sh, s, a, v => if a.toNat % 2 = 0 then some (s.store16 a (v.setWidth 16)) else none
   | .sw, s, a, v => if a.toNat % 4 = 0 then some (s.store32 a v) else none
 
-namespace Program
-
 /-- Execute a single instruction. -/
-def step (s : State) (w : ℓ.World) : (Instr ℓ) -> Option (State × ℓ.World)
+def State.step (s : State) (w : ℓ.World) : (Instr ℓ) -> Option (State × ℓ.World)
   | .RI op rd rs1 rs2 =>
       some <| (State.next (s.write rd (op.eval (s.read rs1) (s.read rs2))), w)
   | .II op rd rs1 imm =>
@@ -271,6 +273,8 @@ def step (s : State) (w : ℓ.World) : (Instr ℓ) -> Option (State × ℓ.World
       let (c', w') <- ℓ.semantics target (s.write .ra (s.pc + 4)).toCore w
       pure (State.next (s.withCore c'), w')
 
+namespace Program
+
 /-- Fetch instruction from a Program for given `pc`. -/
 def fetch (p : Program ℓ) (pc : Word) : Option (Instr ℓ) :=
   if pc % 4 ≠ 0 then none else p[(pc / 4).toNat]?
@@ -278,7 +282,7 @@ def fetch (p : Program ℓ) (pc : Word) : Option (Instr ℓ) :=
 /-- Small step relation between a configuration (machine state and library world)
 and its successor. -/
 def Step (p : Program ℓ) (s s' : State) (w w' : ℓ.World) : Prop :=
-  ∃ i, fetch p s.pc = some i ∧ step s w i = some (s', w')
+  ∃ i, fetch p s.pc = some i ∧ s.step w i = some (s', w')
 
 /-- Transitive reflexive closure of `Step` -/
 inductive Step.Star (p : Program ℓ) : State -> State -> ℓ.World -> ℓ.World -> Prop
@@ -289,7 +293,7 @@ inductive Step.Star (p : Program ℓ) : State -> State -> ℓ.World -> ℓ.World
 
 /-- Prepend a single step to a run: the workhorse for symbolic execution in proofs. -/
 theorem Step.Star.head {p : Program ℓ} {s t u : State} {w v x : ℓ.World} (i : Instr ℓ)
-    (hf : fetch p s.pc = some i) (hs : Program.step s w i = some (t, v))
+    (hf : fetch p s.pc = some i) (hs : s.step w i = some (t, v))
     (h : Step.Star p t u v x) : Step.Star p s u w x :=
   .trans (.step ⟨i, hf, hs⟩) h
 
@@ -301,7 +305,7 @@ def run (p : Program ℓ) : Nat -> State -> ℓ.World -> State × ℓ.World
     match fetch p s.pc with
     | none => (s, w)
     | some i =>
-      match step s w i with
+      match s.step w i with
       | none => (s, w)
       | some (s', w') => run p n s' w'
 

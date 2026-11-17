@@ -169,9 +169,6 @@ def isProtected (s : State) (a : Word) (n : Nat) : Bool :=
 def initial (s : State) : Prop :=
   s.pc = ⟨0, 0, []⟩ ∧ (s.read .sp).toNat % 4 = 0
 
-end State
-
-namespace Program
 
 def step (s : State) (w : ℓ.World) : Instr ℓ → Option (State × ℓ.World)
   | .RI op rd rs1 rs2 =>
@@ -210,10 +207,14 @@ def step (s : State) (w : ℓ.World) : Instr ℓ → Option (State × ℓ.World)
       | .val v :: rest => some (State.next ((s.pop rest).write rd v), w)
       | _ => none
 
+end State
+
+namespace Program
+
 /-- Small step relation between a configuration (machine state and library world)
 and its successor. -/
 def Step (p : Program ℓ) (s s' : State) (w w' : ℓ.World) : Prop :=
-  ∃ i, p.fetch s.pc = some i ∧ step s w i = some (s', w')
+  ∃ i, p.fetch s.pc = some i ∧ s.step w i = some (s', w')
 
 /-- Transitive reflexive closure of `Step` -/
 inductive Step.Star (p : Program ℓ) : State → State → ℓ.World → ℓ.World → Prop
@@ -224,7 +225,7 @@ inductive Step.Star (p : Program ℓ) : State → State → ℓ.World → ℓ.Wo
 
 /-- Prepend a single step to a run. -/
 theorem Step.Star.head {p : Program ℓ} {s t u : State} {w v x : ℓ.World} (i : Instr ℓ)
-    (hf : p.fetch s.pc = some i) (hs : Program.step s w i = some (t, v))
+    (hf : p.fetch s.pc = some i) (hs : s.step w i = some (t, v))
     (h : Step.Star p t u v x) : Step.Star p s u w x :=
   .trans (.step ⟨i, hf, hs⟩) h
 
@@ -235,7 +236,7 @@ def run (p : Program ℓ) : Nat → State → ℓ.World → State × ℓ.World
     match p.fetch s.pc with
     | none => (s, w)
     | some i =>
-      match step s w i with
+      match s.step w i with
       | none => (s, w)
       | some (s', w') => run p n s' w'
 
@@ -253,7 +254,13 @@ theorem run_star (p : Program ℓ) :
       · rename_i s' w' hs
         exact .trans (.step ⟨i, hf, hs⟩) (run_star p n s' w')
 
+
 end Program
+
+/- Terminal State of a given `Sym.Program` -/
+def State.terminal (s : State) (p : Program ℓ) :=
+  p.fetch s.pc = some .Ret ∧ s.pc.stack = []
+
 end -- Section with fixed `ℓ : Library`
 end Sym
 end Rv32i
